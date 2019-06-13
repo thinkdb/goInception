@@ -1233,6 +1233,9 @@ func (s *session) mysqlCreateBackupTable(record *Record) int {
 				if myErr.Number != 1050 { /*ER_TABLE_EXISTS_ERROR*/
 					s.AppendErrorMessage(myErr.Message)
 					return 2
+				} else {
+					// 表已存在时,自动检查和添加is_delete列及时间列索引
+					s.mysqlAutoFixBackupTableColumn(backupDBName)
 				}
 			} else {
 				s.AppendErrorMessage(err.Error())
@@ -1265,11 +1268,33 @@ func (s *session) mysqlCreateSqlBackupTable(dbname string) string {
 	buf.WriteString("port INT,")
 	buf.WriteString("time TIMESTAMP,")
 	buf.WriteString("type VARCHAR(20),")
+	buf.WriteString("is_delete tinyint(1) not null default 0 comment '是否已删除 [1:是,0:否]',")
+	buf.WriteString("key idx_time(time),")
 	buf.WriteString("PRIMARY KEY(opid_time)")
 
 	buf.WriteString(")ENGINE INNODB DEFAULT CHARSET UTF8;")
 
 	return buf.String()
+}
+
+// mysqlAutoFixBackupTableColumn 自动检查和添加is_delete列及时间列索引
+func (s *session) mysqlAutoFixBackupTableColumn(dbname string) {
+
+	// 表已存在时,判断是否包含is_delete字段和时间列索引
+	sql := fmt.Sprintf("select is_delete from `%s`.`%s` limit 1;", dbname, remoteBackupTable)
+	if err := s.backupdb.Exec(sql).Error; err != nil {
+
+		buf := bytes.NewBufferString("ALTER TABLE ")
+		buf.WriteString(fmt.Sprintf("`%s`.`%s` ", dbname, remoteBackupTable))
+		buf.WriteString("ADD COLUMN is_delete tinyint(1) not null default 0 comment '是否已删除 [1:是,0:否]',")
+		buf.WriteString("ADD INDEX idx_time(time);")
+
+		sql = buf.String()
+
+		if err2 := s.backupdb.Exec(sql).Error; err2 != nil {
+			log.Error(err2)
+		}
+	}
 }
 
 func (s *session) mysqlCreateSqlFromTableInfo(dbname string, ti *TableInfo) string {

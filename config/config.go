@@ -272,6 +272,11 @@ type Inc struct {
 	BackupPort     uint   `toml:"backup_port" json:"backup_port"`
 	BackupUser     string `toml:"backup_user" json:"backup_user"`
 
+	// 备份库回滚SQL的保留天数，默认值 `0`，即不清理
+	BackupMaxDays uint `toml:"backup_max_days" json:"backup_max_days"`
+	// 备份库回滚SQL的清理时间点, 格式为hour-hour,默认值0-24
+	BackupClearHours string `toml:"backup_clear_hours" json:"backup_clear_hours"`
+
 	CheckAutoIncrementDataType  bool `toml:"check_autoincrement_datatype" json:"check_autoincrement_datatype"`
 	CheckAutoIncrementInitValue bool `toml:"check_autoincrement_init_value" json:"check_autoincrement_init_value"`
 	CheckAutoIncrementName      bool `toml:"check_autoincrement_name" json:"check_autoincrement_name"`
