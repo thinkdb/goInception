@@ -52,6 +52,8 @@ type testSessionIncSuite struct {
 	explicitDefaultsForTimestamp bool
 
 	rows [][]interface{}
+
+	realRowCount bool
 }
 
 func (s *testSessionIncSuite) SetUpSuite(c *C) {
@@ -59,6 +61,7 @@ func (s *testSessionIncSuite) SetUpSuite(c *C) {
 	if testing.Short() {
 		c.Skip("skipping test; in TRAVIS mode")
 	}
+	s.realRowCount = true
 
 	testleak.BeforeTest()
 	s.cluster = mocktikv.NewCluster()
@@ -265,23 +268,23 @@ func (s *testSessionIncSuite) makeSQL(sql string) *testkit.Result {
 	tk := s.tk
 	session.CheckAuditSetting(config.GetGlobalConfig())
 
-	a := `/*--user=test;--password=test;--host=127.0.0.1;--check=1;--backup=0;--port=3306;--enable-ignore-warnings;*/
+	a := `/*--user=test;--password=test;--host=127.0.0.1;--check=1;--backup=0;--port=3306;--enable-ignore-warnings;real_row_count=%v;*/
 inception_magic_start;
 use test_inc;
 %s;
 inception_magic_commit;`
-	return tk.MustQueryInc(fmt.Sprintf(a, sql))
+	return tk.MustQueryInc(fmt.Sprintf(a, s.realRowCount, sql))
 }
 
 func (s *testSessionIncSuite) execSQL(c *C, sql string) *testkit.Result {
 	config.GetGlobalConfig().Inc.EnableDropTable = true
 	session.CheckAuditSetting(config.GetGlobalConfig())
-	a := `/*--user=test;--password=test;--host=127.0.0.1;--execute=1;--backup=0;--port=3306;--enable-ignore-warnings;*/
+	a := `/*--user=test;--password=test;--host=127.0.0.1;--execute=1;--backup=0;--port=3306;--enable-ignore-warnings;real_row_count=%v;*/
 inception_magic_start;
 use test_inc;
 %s;
 inception_magic_commit;`
-	res := s.tk.MustQueryInc(fmt.Sprintf(a, sql))
+	res := s.tk.MustQueryInc(fmt.Sprintf(a, s.realRowCount, sql))
 
 	for _, row := range res.Rows() {
 		c.Assert(row[2], Not(Equals), "2", Commentf("%v", row))
@@ -1241,6 +1244,7 @@ func (s *testSessionIncSuite) TestAlterTableModifyColumn(c *C) {
 	sql = "create table t1(id int primary key,c1 int,c2 int);alter table t1 modify column c1 int after c2"
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ErCantChangeColumnPosition, "t1.c1"))
+
 	sql = "create table t1(id int primary key,c1 int,c2 int);alter table t1 change column c1 c3 int after id"
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ErCantChangeColumnPosition, "t1.c3"))
@@ -1255,6 +1259,12 @@ func (s *testSessionIncSuite) TestAlterTableModifyColumn(c *C) {
 
 	sql = "alter table t1 modify c1 int not null;alter table t1 add primary key(id,c1);"
 	s.testErrorCode(c, sql)
+
+	config.GetGlobalConfig().Inc.EnableChangeColumn = false
+
+	sql = "create table t1(id int primary key,c1 int,c2 int);alter table t1 change column c1 c3 int after id"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErCantChangeColumn, "c1"))
 }
 
 func (s *testSessionIncSuite) TestAlterTableDropColumn(c *C) {
@@ -1420,7 +1430,11 @@ insert into t1 values(1),(2),(3);`
 	sql = `drop table if exists t2;create table t2 like t1;
 insert into t2 select id from t1;`
 	s.testErrorCode(c, sql)
-	s.testAffectedRows(c, 1)
+	if s.realRowCount {
+		s.testAffectedRows(c, 0)
+	} else {
+		s.testAffectedRows(c, 1)
+	}
 
 	config.GetGlobalConfig().Inc.EnableSelectStar = true
 	s.execSQL(c, "drop table if exists tt1;create table tt1(id int,c1 int);insert into tt1 values(1,1);")
@@ -2227,12 +2241,12 @@ func (s *testSessionIncSuite) TestFloatDouble(c *C) {
 	defer func() {
 		config.GetGlobalConfig().Inc = saved
 	}()
-	
+
 	config.GetGlobalConfig().Inc.CheckFloatDouble = true
 	sql := `drop table if exists t1;create table t1(id int,c1 float,key ix(c1));`
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ErrFloatDoubleToDecimal, "c1"))
-	
+
 	sql = `drop table if exists t1;create table t1(id int, c2 double,key ix(c2));`
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ErrFloatDoubleToDecimal, "c2"))
@@ -2244,13 +2258,12 @@ func (s *testSessionIncSuite) TestIdentifierUpper(c *C) {
 	defer func() {
 		config.GetGlobalConfig().Inc = saved
 	}()
-	
+
 	config.GetGlobalConfig().Inc.CheckIdentifierUpper = true
 	sql := `drop table if exists hello;create table HELLO(ID int,C1 float, C2 double,key IDX_C1(C1),UNIQUE INDEX uniq_A(C2));`
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ErrIdentifierUpper, "uniq_A"),
-		)
-	
+	)
+
 	config.GetGlobalConfig().Inc.CheckIdentifierUpper = false
 }
-

@@ -1,6 +1,37 @@
 # goInception 更新日志
 
 
+## [v1.0.3] - 2019-7-29
+
+### Fix
+* `[gh-ost]` 修复gh-ost在异常时没有断开binlog dump连接的问题
+* `[gh-ost]` 修复gh-ost当添加datetime列且默认值current_timestamp时,增量数据因时区导致数据错误的问题(timestamp列是正常的)
+
+### New Features
+* 添加参数 `enable_change_column` ,设置是否支持change column语法
+* 添加调用选项 `real_row_count`,设置是否通过`count(*)`获取真正受影响行数.默认值`false`
+
+### Update
+* 添加pt-osc执行change column的审核,禁止多条change column操作,以免数据丢失 (pt-osc bug)
+
+
+## [v1.0.2] - 2019-7-26
+
+### Fix
+* 修复 `alter table` 命令没有其他选项时能正常通过的bug (#59)
+* 修复跨库操作时可能出现备份记录写错备份库的问题
+
+### New Features
+* 添加参数 `max_ddl_affect_rows`，设置DDL允许的最大受影响行数，默认为`0`，即不限制
+* 添加参数 `check_float_double` ，为 true 时，警告将 float/double 转成 decimal 数据类型。 默认为 false (#62)
+* 添加参数 `check_identifier_upper` ，限制表名、列名、索引名等必须为大写，默认为`false` (#63)
+
+### Update
+* 优化自定义审核级别实现，移除参数 `enable_level`，现在自定义审核级别和审核开关设置合并 (#52)
+* 升级parser语法解析包，优化列排序规则和分区表语法支持 (#50)
+* 优化gh-ost的server_id设置自动变化，避免同一实例重复
+
+
 ## [v1.0.1] - 2019-7-20
 
 ### Fix

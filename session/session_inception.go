@@ -47,7 +47,10 @@ import (
 	"github.com/hanchuanchuan/goInception/types"
 	"github.com/hanchuanchuan/goInception/util"
 	"github.com/hanchuanchuan/goInception/util/auth"
+	"github.com/hanchuanchuan/goInception/util/sqlexec"
 	"github.com/hanchuanchuan/goInception/util/stringutil"
+	// "vitess.io/vitess/go/vt/sqlparser"
+	// "github.com/hanchuanchuan/parser/ast"
 	"github.com/jinzhu/gorm"
 	"github.com/percona/go-mysql/query"
 	"github.com/pingcap/errors"
@@ -124,6 +127,9 @@ type sourceOptions struct {
 
 	// DDL/DML分隔功能
 	split bool
+
+	// 使用count(*)计算受影响行数
+	realRowCount bool
 }
 
 // ExplainInfo 执行计划信息
@@ -250,7 +256,7 @@ func init() {
 
 }
 
-func (s *session) ExecuteInc(ctx context.Context, sql string) (recordSets []ast.RecordSet, err error) {
+func (s *session) ExecuteInc(ctx context.Context, sql string) (recordSets []sqlexec.RecordSet, err error) {
 
 	// 跳过mysql客户端发送的sql
 	// 跳过tidb测试时发送的sql
@@ -334,7 +340,7 @@ func (s *session) ExecuteInc(ctx context.Context, sql string) (recordSets []ast.
 	return
 }
 
-func (s *session) executeInc(ctx context.Context, sql string) (recordSets []ast.RecordSet, err error) {
+func (s *session) executeInc(ctx context.Context, sql string) (recordSets []sqlexec.RecordSet, err error) {
 	sqlList := strings.Split(sql, "\n")
 
 	defer func() {
@@ -544,7 +550,7 @@ func (s *session) executeInc(ctx context.Context, sql string) (recordSets []ast.
 
 						return s.processCommand(ctx, stmtNode, currentSql)
 					} else {
-						var result []ast.RecordSet
+						var result []sqlexec.RecordSet
 						var err error
 						if s.opt != nil && s.opt.Print {
 							result, err = s.printCommand(ctx, stmtNode, currentSql)
@@ -639,7 +645,7 @@ func (s *session) executeInc(ctx context.Context, sql string) (recordSets []ast.
 	return recordSets, nil
 }
 
-func (s *session) makeResult() (recordSets []ast.RecordSet, err error) {
+func (s *session) makeResult() (recordSets []sqlexec.RecordSet, err error) {
 	if s.opt != nil && s.opt.Print && s.printSets != nil {
 		return s.printSets.Rows(), nil
 	} else if s.opt != nil && s.opt.split && s.splitSets != nil {
@@ -665,7 +671,7 @@ func (s *session) needDataSource(stmtNode ast.StmtNode) bool {
 }
 
 func (s *session) processCommand(ctx context.Context, stmtNode ast.StmtNode,
-	currentSql string) ([]ast.RecordSet, error) {
+	currentSql string) ([]sqlexec.RecordSet, error) {
 	log.Debug("processCommand")
 
 	switch node := stmtNode.(type) {
@@ -760,7 +766,7 @@ func (s *session) processCommand(ctx context.Context, stmtNode ast.StmtNode,
 
 // splitCommand 分隔功能实现
 func (s *session) splitCommand(ctx context.Context, stmtNode ast.StmtNode,
-	sql string) ([]ast.RecordSet, error) {
+	sql string) ([]sqlexec.RecordSet, error) {
 	log.Debug("splitCommand")
 
 	if !s.opt.split {
@@ -1121,7 +1127,7 @@ func (s *session) mysqlExecuteBackupInfoInsertSql(record *Record, longDataType b
 	// 库名改变时强制flush
 	if s.lastBackupTable != dbName {
 		s.chBackupRecord <- &chanBackup{
-			dbname: dbName,
+			dbname: s.lastBackupTable,
 			record: record,
 			values: nil,
 		}
@@ -2069,7 +2075,6 @@ func (s *session) mysqlExplicitDefaultsForTimestamp() {
 }
 
 func (s *session) fetchThreadID() uint32 {
-	log.Debug("fetchThreadID")
 
 	if s.threadID > 0 {
 		return s.threadID
@@ -2234,7 +2239,8 @@ func (s *session) parseOptions(sql string) {
 
 		Print: viper.GetBool("queryPrint"),
 
-		split: viper.GetBool("split"),
+		split:        viper.GetBool("split"),
+		realRowCount: viper.GetBool("realRowCount"),
 	}
 
 	if s.opt.split || s.opt.check || s.opt.Print {
@@ -3090,6 +3096,7 @@ func (s *session) checkAlterTable(node *ast.AlterTableStmt, sql string) {
 			s.checkAlterUseOsc(table)
 		} else {
 			s.myRecord.useOsc = false
+			break
 		}
 	}
 
@@ -3133,6 +3140,13 @@ func (s *session) checkAlterTable(node *ast.AlterTableStmt, sql string) {
 		case ast.AlterTableModifyColumn:
 			s.checkModifyColumn(table, alter)
 		case ast.AlterTableChangeColumn:
+
+			s.AppendErrorNo(ErCantChangeColumn, alter.OldColumnName.String())
+
+			// 如果使用pt-osc,且非第一条语句使用了change命令,则禁止
+			if i > 0 && s.myRecord.useOsc && s.Osc.OscOn && !s.Ghost.GhostOn {
+				s.AppendErrorMessage("Can't execute this sql,the renamed columns' data maybe lost(pt-osc have a bug)!")
+			}
 			s.checkChangeColumn(table, alter)
 
 		case ast.AlterTableRenameTable:
@@ -3653,7 +3667,7 @@ func (s *session) mysqlCheckField(t *TableInfo, field *ast.ColumnDef) {
 	if field.Tp.Tp == mysql.TypeString && field.Tp.Flen > int(s.Inc.MaxCharLength) {
 		s.AppendErrorNo(ER_CHAR_TO_VARCHAR_LEN, field.Name.Name)
 	}
-	
+
 	if (field.Tp.Tp == mysql.TypeFloat || field.Tp.Tp == mysql.TypeDouble) && s.Inc.CheckFloatDouble {
 		s.AppendErrorNo(ErrFloatDoubleToDecimal, field.Name.Name)
 	}
@@ -3695,6 +3709,8 @@ func (s *session) mysqlCheckField(t *TableInfo, field *ast.ColumnDef) {
 				isPrimary = true
 			case ast.ColumnOptionGenerated:
 				hasGenerated = true
+			case ast.ColumnOptionCollate:
+				s.AppendErrorNo(ER_CHARSET_ON_COLUMN, tableName, field.Name.Name)
 			}
 		}
 	}
@@ -3836,11 +3852,11 @@ func (s *session) checkIndexAttr(tp ast.ConstraintType, name string,
 		// 		break
 		// 	}
 		// }
-		
-		if s.Inc.CheckIdentifierUpper && name != strings.ToUpper(name){
+
+		if name != strings.ToUpper(name) {
 			s.AppendErrorNo(ErrIdentifierUpper, name)
 		}
-		
+
 		if isIncorrectName(name) {
 			s.AppendErrorNo(ER_WRONG_NAME_FOR_INDEX, name, table.Name)
 		} else {
@@ -3866,7 +3882,7 @@ func (s *session) checkIndexAttr(tp ast.ConstraintType, name string,
 		}
 
 	default:
-		if  !strings.HasPrefix(strings.ToLower(name), "idx_"){
+		if !strings.HasPrefix(strings.ToLower(name), "idx_") {
 			s.AppendErrorNo(ER_INDEX_NAME_IDX_PREFIX, name, table.Name)
 		}
 	}
@@ -4839,7 +4855,7 @@ func (s *session) checkDropDB(node *ast.DropDatabaseStmt, sql string) {
 	}
 }
 
-func (s *session) executeInceptionSet(node *ast.InceptionSetStmt, sql string) ([]ast.RecordSet, error) {
+func (s *session) executeInceptionSet(node *ast.InceptionSetStmt, sql string) ([]sqlexec.RecordSet, error) {
 	log.Debug("executeInceptionSet")
 
 	for _, v := range node.Variables {
@@ -5107,7 +5123,7 @@ func (s *session) showVariables(node *ast.ShowStmt, obj interface{}, res *Variab
 	}
 }
 
-func (s *session) executeLocalShowVariables(node *ast.ShowStmt) ([]ast.RecordSet, error) {
+func (s *session) executeLocalShowVariables(node *ast.ShowStmt) ([]sqlexec.RecordSet, error) {
 
 	res := NewVariableSets(120)
 	s.showVariables(node, s.Inc, res)
@@ -5119,7 +5135,7 @@ func (s *session) executeLocalShowVariables(node *ast.ShowStmt) ([]ast.RecordSet
 	return res.Rows(), nil
 }
 
-func (s *session) executeLocalShowProcesslist(node *ast.ShowStmt) ([]ast.RecordSet, error) {
+func (s *session) executeLocalShowProcesslist(node *ast.ShowStmt) ([]sqlexec.RecordSet, error) {
 	pl := s.sessionManager.ShowProcessList()
 
 	var keys []int
@@ -5260,7 +5276,7 @@ func filter(expr []ast.ExprNode, colNames []string, value []string) (bool, error
 	return true, nil
 }
 
-func (s *session) executeLocalShowLevels(node *ast.ShowStmt) ([]ast.RecordSet, error) {
+func (s *session) executeLocalShowLevels(node *ast.ShowStmt) ([]sqlexec.RecordSet, error) {
 	log.Debug("executeLocalShowLevels")
 
 	res := NewLevelSets(len(s.incLevel))
@@ -5348,7 +5364,7 @@ func (s *session) executeLocalShowLevels(node *ast.ShowStmt) ([]ast.RecordSet, e
 	s.sessionVars.StmtCtx.AddAffectedRows(uint64(res.rc.count))
 	return res.Rows(), nil
 }
-func (s *session) executeLocalShowOscProcesslist(node *ast.ShowOscStmt) ([]ast.RecordSet, error) {
+func (s *session) executeLocalShowOscProcesslist(node *ast.ShowOscStmt) ([]sqlexec.RecordSet, error) {
 	pl := s.sessionManager.ShowOscProcessList()
 
 	// 根据是否指定sqlsha1控制显示command列
@@ -5397,7 +5413,7 @@ func (s *session) executeLocalShowOscProcesslist(node *ast.ShowOscStmt) ([]ast.R
 	return res.Rows(), nil
 }
 
-func (s *session) executeLocalOscKill(node *ast.ShowOscStmt) ([]ast.RecordSet, error) {
+func (s *session) executeLocalOscKill(node *ast.ShowOscStmt) ([]sqlexec.RecordSet, error) {
 	pl := s.sessionManager.ShowOscProcessList()
 
 	if pi, ok := pl[node.Sqlsha1]; ok {
@@ -5413,7 +5429,7 @@ func (s *session) executeLocalOscKill(node *ast.ShowOscStmt) ([]ast.RecordSet, e
 	return nil, nil
 }
 
-func (s *session) executeLocalOscPause(node *ast.ShowOscStmt) ([]ast.RecordSet, error) {
+func (s *session) executeLocalOscPause(node *ast.ShowOscStmt) ([]sqlexec.RecordSet, error) {
 	pl := s.sessionManager.ShowOscProcessList()
 
 	if pi, ok := pl[node.Sqlsha1]; ok {
@@ -5433,7 +5449,7 @@ func (s *session) executeLocalOscPause(node *ast.ShowOscStmt) ([]ast.RecordSet, 
 	return nil, nil
 }
 
-func (s *session) executeLocalOscResume(node *ast.ShowOscStmt) ([]ast.RecordSet, error) {
+func (s *session) executeLocalOscResume(node *ast.ShowOscStmt) ([]sqlexec.RecordSet, error) {
 	pl := s.sessionManager.ShowOscProcessList()
 
 	if pi, ok := pl[node.Sqlsha1]; ok {
@@ -5453,7 +5469,7 @@ func (s *session) executeLocalOscResume(node *ast.ShowOscStmt) ([]ast.RecordSet,
 	return nil, nil
 }
 
-func (s *session) executeInceptionShow(sql string) ([]ast.RecordSet, error) {
+func (s *session) executeInceptionShow(sql string) ([]sqlexec.RecordSet, error) {
 	log.Debug("executeInceptionShow")
 
 	rows, err := s.Raw(sql)
@@ -5725,6 +5741,73 @@ func (s *session) getExplainInfo(sql string, sqlId string) {
 	}
 }
 
+// getRealRowCount: 获取真正的受影响行数
+func (s *session) getRealRowCount(sql string, sqlId string) {
+
+	if s.hasError() {
+		return
+	}
+
+	var newRecord *Record
+	if s.Inc.EnableFingerprint && sqlId != "" {
+		newRecord = &Record{
+			Buf: new(bytes.Buffer),
+		}
+	}
+	r := s.myRecord
+
+	var value int
+	rows, err := s.Raw(sql)
+	if rows != nil {
+		defer rows.Close()
+	}
+
+	if err != nil {
+		// log.Error(err)
+		log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+		if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
+			s.AppendErrorMessage(myErr.Message)
+			if newRecord != nil {
+				newRecord.AppendErrorMessage(myErr.Message)
+			}
+		} else {
+			s.AppendErrorMessage(err.Error())
+			if newRecord != nil {
+				newRecord.AppendErrorMessage(myErr.Message)
+			}
+		}
+		return
+	} else {
+		for rows.Next() {
+			rows.Scan(&value)
+		}
+	}
+
+	// log.Info(sql)
+	// log.Info(value)
+
+	r.AffectedRows = value
+	if newRecord != nil {
+		newRecord.AffectedRows = r.AffectedRows
+	}
+
+	if s.Inc.MaxUpdateRows > 0 && r.AffectedRows > int(s.Inc.MaxUpdateRows) {
+		switch r.Type.(type) {
+		case *ast.DeleteStmt, *ast.UpdateStmt:
+			s.AppendErrorNo(ER_UDPATE_TOO_MUCH_ROWS,
+				r.AffectedRows, s.Inc.MaxUpdateRows)
+			if newRecord != nil {
+				newRecord.AppendErrorNo(ER_UDPATE_TOO_MUCH_ROWS,
+					r.AffectedRows, s.Inc.MaxUpdateRows)
+			}
+		}
+	}
+
+	if newRecord != nil {
+		s.sqlFingerprint[sqlId] = newRecord
+	}
+}
+
 func (s *session) explainOrAnalyzeSql(sql string) {
 
 	// // 如果没有表结构,或者新增表 or 新增列时,不做explain
@@ -5738,38 +5821,62 @@ func (s *session) explainOrAnalyzeSql(sql string) {
 		return
 	}
 
-	if s.DBVersion < 50600 {
+	if s.opt.realRowCount {
+		// dml转换成select
 		rw, err := NewRewrite(sql)
 		if err != nil {
 			log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
 			s.AppendErrorMessage(err.Error())
 		} else {
-			rw, err = rw.Rewrite()
+			rw, err = rw.RewriteDML2Select()
 			if err != nil {
 				log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
 				s.AppendErrorMessage(err.Error())
 			} else {
-				sql = rw.NewSQL
-				if sql == "" {
-					return
+				stmt, err := NewRewrite(rw.NewSQL)
+				if err != nil {
+					log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+					s.AppendErrorMessage(err.Error())
+				} else {
+					sql = stmt.select2Count()
+					// log.Info(sql)
+					s.getRealRowCount(sql, sqlId)
 				}
 			}
 		}
+		return
+	} else {
+		if s.DBVersion < 50600 {
+			rw, err := NewRewrite(sql)
+			if err != nil {
+				log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+				s.AppendErrorMessage(err.Error())
+			} else {
+				rw, err = rw.RewriteDML2Select()
+				if err != nil {
+					log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+					s.AppendErrorMessage(err.Error())
+				} else {
+					sql = rw.NewSQL
+					if sql == "" {
+						return
+					}
+				}
+			}
+		}
+
+		var explain []string
+
+		if s.isMiddleware() {
+			explain = append(explain, s.opt.middlewareExtend)
+		}
+
+		explain = append(explain, "EXPLAIN ")
+		explain = append(explain, sql)
+
+		// rows := s.getExplainInfo(strings.Join(explain, ""))
+		s.getExplainInfo(strings.Join(explain, ""), sqlId)
 	}
-
-	var explain []string
-
-	if s.isMiddleware() {
-		explain = append(explain, s.opt.middlewareExtend)
-	}
-
-	explain = append(explain, "EXPLAIN ")
-	explain = append(explain, sql)
-
-	// rows := s.getExplainInfo(strings.Join(explain, ""))
-	s.getExplainInfo(strings.Join(explain, ""), sqlId)
-
-	// s.AnlyzeExplain(rows)
 }
 
 func (s *session) AnlyzeExplain(rows []ExplainInfo) {
@@ -6358,10 +6465,10 @@ func (s *session) AppendErrorNo(number ErrorCode, values ...interface{}) {
 }
 
 func (s *session) checkKeyWords(name string) {
-	if name != strings.ToUpper(name){
+	if name != strings.ToUpper(name) {
 		s.AppendErrorNo(ErrIdentifierUpper, name)
 	}
-	
+
 	if !regIdentified.MatchString(name) {
 		s.AppendErrorNo(ER_INVALID_IDENT, name)
 	} else if _, ok := Keywords[strings.ToUpper(name)]; ok {
@@ -6486,6 +6593,8 @@ func (s *session) checkInceptionVariables(number ErrorCode) bool {
 		return s.Inc.CheckDatetimeCount
 	case ErrIdentifierUpper:
 		return s.Inc.CheckIdentifierUpper
+	case ErCantChangeColumn:
+		return !s.Inc.EnableChangeColumn
 	}
 
 	return true
@@ -6972,7 +7081,7 @@ func (s *session) isMiddleware() bool {
 	return s.opt.middlewareExtend != ""
 }
 
-func (s *session) executeKillStmt(node *ast.KillStmt) ([]ast.RecordSet, error) {
+func (s *session) executeKillStmt(node *ast.KillStmt) ([]sqlexec.RecordSet, error) {
 	sm := s.GetSessionManager()
 	if sm == nil {
 		return nil, nil
