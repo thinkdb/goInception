@@ -754,6 +754,11 @@ func (s *session) processCommand(ctx context.Context, stmtNode ast.StmtNode,
 
 	case *ast.KillStmt:
 		return s.executeKillStmt(node)
+
+	case *ast.SetStmt:
+
+		s.checkSetStmt(node)
+
 	default:
 		log.Infof("无匹配类型:%T\n", stmtNode)
 		s.AppendErrorNo(ER_NOT_SUPPORTED_YET)
@@ -1544,6 +1549,7 @@ func (s *session) executeRemoteCommand(record *Record) int {
 		*ast.TruncateTableStmt,
 
 		*ast.CreateIndexStmt,
+		*ast.SetStmt,
 		*ast.DropIndexStmt:
 
 		s.executeRemoteStatement(record)
@@ -2467,6 +2473,41 @@ func (s *session) mysqlShowTableStatus(t *TableInfo) {
 	}
 }
 
+// mysqlForeignKeys 获取表的所有外键
+func (s *session) mysqlForeignKeys(t *TableInfo) (keys []string) {
+
+	if t.IsNew {
+		return
+	}
+
+	// sql := fmt.Sprintf("show table status from `%s` where name = '%s';", dbname, tableName)
+	sql := fmt.Sprintf(`SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+		WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s' and ORDINAL_POSITION = 1;`, t.Schema, t.Name)
+
+	var name string
+
+	rows, err := s.Raw(sql)
+	if rows != nil {
+		defer rows.Close()
+	}
+	if err != nil {
+		// log.Error(err)
+		log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+		if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
+			s.AppendErrorMessage(myErr.Message)
+		} else {
+			s.AppendErrorMessage(err.Error())
+		}
+	} else if rows != nil {
+		for rows.Next() {
+			rows.Scan(&name)
+			keys = append(keys, name)
+		}
+	}
+
+	return
+}
+
 // mysqlGetTableSize 获取表估计的受影响行数
 func (s *session) mysqlGetTableSize(t *TableInfo) {
 
@@ -2904,6 +2945,11 @@ func (s *session) checkCreateTable(node *ast.CreateTableStmt, sql string) {
 		if node.ReferTable != nil || len(node.Cols) > 0 {
 			dupIndexes := map[string]bool{}
 			for _, ct := range node.Constraints {
+				if ct.Tp == ast.ConstraintForeignKey {
+					s.checkCreateForeignKey(table, ct)
+					continue
+				}
+
 				s.checkCreateIndex(nil, ct.Name,
 					ct.Keys, ct.Option, table, false, ct.Tp)
 
@@ -3830,7 +3876,7 @@ func (s *session) checkIndexAttr(tp ast.ConstraintType, name string,
 	if tp == ast.ConstraintPrimaryKey {
 
 		if s.Inc.MaxPrimaryKeyParts > 0 && len(keys) > int(s.Inc.MaxPrimaryKeyParts) {
-			s.AppendErrorNo(ER_TOO_MANY_KEY_PARTS, table.Schema, table.Name, s.Inc.MaxPrimaryKeyParts)
+			s.AppendErrorNo(ER_PK_TOO_MANY_PARTS, table.Schema, table.Name, s.Inc.MaxPrimaryKeyParts)
 		}
 
 		s.checkDuplicateColumnName(keys)
@@ -3888,18 +3934,83 @@ func (s *session) checkIndexAttr(tp ast.ConstraintType, name string,
 	}
 
 	if s.Inc.MaxKeyParts > 0 && len(keys) > int(s.Inc.MaxKeyParts) {
-		s.AppendErrorNo(ER_TOO_MANY_KEY_PARTS, table.Name, s.Inc.MaxKeyParts)
+		s.AppendErrorNo(ER_TOO_MANY_KEY_PARTS, name, table.Name, s.Inc.MaxKeyParts)
 	}
 
+}
+
+func (s *session) checkCreateForeignKey(t *TableInfo, c *ast.Constraint) {
+	// log.Infof("%#v", c)
+
+	if !s.Inc.EnableForeignKey {
+		s.AppendErrorNo(ER_FOREIGN_KEY, t.Name)
+		return
+	}
+
+	for _, col := range c.Keys {
+		found := false
+		for _, field := range t.Fields {
+			if strings.EqualFold(field.Field, col.Column.Name.O) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.AppendErrorNo(ER_COLUMN_NOT_EXISTED, fmt.Sprintf("%s.%s", t.Name, col.Column.Name.O))
+		}
+	}
+
+	refTable := s.getTableFromCache(c.Refer.Table.Schema.O, c.Refer.Table.Name.O, true)
+	if refTable != nil {
+		for _, col := range c.Refer.IndexColNames {
+			found := false
+			for _, field := range refTable.Fields {
+				if strings.EqualFold(field.Field, col.Column.Name.O) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.AppendErrorNo(ER_COLUMN_NOT_EXISTED, fmt.Sprintf("%s.%s", refTable.Name, col.Column.Name.O))
+			}
+		}
+	}
+	if len(c.Keys) != len(c.Refer.IndexColNames) {
+		s.AppendErrorNo(ErrWrongFkDefWithMatch, c.Name)
+	}
+
+	if !t.IsNew && c.Name != "" {
+		keys := s.mysqlForeignKeys(t)
+		for _, k := range keys {
+			if strings.EqualFold(k, c.Name) {
+				s.AppendErrorNo(ErrFkDupName, c.Name)
+				break
+			}
+		}
+	}
 }
 
 func (s *session) checkDropForeignKey(t *TableInfo, c *ast.AlterTableSpec) {
 	log.Debug("checkDropForeignKey")
 
 	// log.Infof("%s \n", c)
-
-	s.AppendErrorNo(ER_NOT_SUPPORTED_YET)
-
+	if s.Inc.EnableForeignKey {
+		if !t.IsNew {
+			keys := s.mysqlForeignKeys(t)
+			found := false
+			for _, k := range keys {
+				if strings.EqualFold(k, c.Name) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.AppendErrorNo(ER_CANT_DROP_FIELD_OR_KEY, c.Name)
+			}
+		}
+	} else {
+		s.AppendErrorNo(ER_NOT_SUPPORTED_YET)
+	}
 }
 func (s *session) checkAlterTableDropIndex(t *TableInfo, indexName string) bool {
 	log.Debug("checkAlterTableDropIndex")
@@ -4309,7 +4420,8 @@ func (s *session) checkAddConstraint(t *TableInfo, c *ast.AlterTableSpec) {
 	case ast.ConstraintPrimaryKey:
 		s.checkCreateIndex(nil, "PRIMARY",
 			c.Constraint.Keys, c.Constraint.Option, t, true, c.Constraint.Tp)
-
+	case ast.ConstraintForeignKey:
+		s.checkCreateForeignKey(t, c.Constraint)
 	default:
 		s.AppendErrorNo(ER_NOT_SUPPORTED_YET)
 		log.Info("con:", s.sessionVars.ConnectionID, " 未定义的解析: ", c.Constraint.Tp)
@@ -5901,9 +6013,18 @@ func (s *session) checkUpdate(node *ast.UpdateStmt, sql string) {
 	var firstColumnName string
 	if node.List != nil {
 		for _, l := range node.List {
-			originTable = l.Column.Table.L
-			firstColumnName = l.Column.Name.O
-			break
+			if firstColumnName == "" {
+				originTable = l.Column.Table.L
+				firstColumnName = l.Column.Name.O
+			}
+
+			if l.Expr != nil {
+				if expr, ok := l.Expr.(*ast.BinaryOperationExpr); ok {
+					if expr.Op == opcode.LogicAnd {
+						s.AppendErrorNo(ErrWrongAndExpr)
+					}
+				}
+			}
 		}
 	}
 
@@ -7218,6 +7339,23 @@ func (s *session) cleanup() {
 	if len(oscList) > 0 {
 		for _, sha1 := range oscList {
 			delete(pl, sha1)
+		}
+	}
+}
+
+func (s *session) checkSetStmt(node *ast.SetStmt) {
+	for _, variable := range node.Variables {
+		if variable.Name == ast.SetNames {
+			if value, ok := variable.Value.(*ast.ValueExpr); ok {
+				v := value.GetString()
+				if strings.EqualFold(v, "utf8") || strings.EqualFold(v, "utf8mb4") {
+					continue
+				}
+				s.AppendErrorNo(ErrCharsetNotSupport, "utf8,utf8mb4")
+			}
+		} else {
+			s.AppendErrorNo(ER_NOT_SUPPORTED_YET)
+			continue
 		}
 	}
 }

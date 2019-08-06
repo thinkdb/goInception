@@ -201,6 +201,10 @@ const (
 	ER_TOO_MUCH_AUTO_DATETIME_COLS
 	ErrFloatDoubleToDecimal
 	ErrIdentifierUpper
+	ErrWrongAndExpr
+	ErrCannotAddForeign
+	ErrWrongFkDefWithMatch
+	ErrFkDupName
 	ER_ERROR_LAST
 )
 
@@ -366,6 +370,10 @@ var ErrorsDefault = map[ErrorCode]string{
 	ER_TOO_MUCH_AUTO_DATETIME_COLS: "Incorrect table definition; there can be only one DATETIME column with CURRENT_TIMESTAMP in DEFAULT or ON UPDATE clause",
 	ErrFloatDoubleToDecimal:        "Set column '%s' to DECIMAL type.",
 	ErrIdentifierUpper:             "Identifier '%s' must be capitalized.",
+	ErrWrongAndExpr:                "May be the wrong syntax! Separate multiple fields with commas.",
+	ErrCannotAddForeign:            "Cannot add foreign key constraint",
+	ErrWrongFkDefWithMatch:         "Incorrect foreign key definition for '%-.192s': Key reference and table reference don't match",
+	ErrFkDupName:                   "Duplicate foreign key constraint name '%s'",
 }
 
 var ErrorsChinese = map[ErrorCode]string{
@@ -524,6 +532,7 @@ var ErrorsChinese = map[ErrorCode]string{
 	ER_TOO_MUCH_AUTO_DATETIME_COLS:         "表定义不正确,只能有一个 datetime 字段,在 DEFAULT 或 ON UPDATE指定CURRENT_TIMESTAMP.",
 	ErrFloatDoubleToDecimal:                "列 '%s' 建议设置为 decimal 类型.",
 	ErrIdentifierUpper:                     "标识符 '%s' 必须大写.",
+	ErrWrongAndExpr:                        "可能是错误语法!更新多个字段时请使用逗号分隔.",
 }
 
 func GetErrorLevel(code ErrorCode) uint8 {
@@ -579,6 +588,7 @@ func GetErrorLevel(code ErrorCode) uint8 {
 		ErrNotFoundThreadId,
 		ErrTableCollationNotSupport,
 		ER_DATETIME_DEFAULT,
+		ErrWrongAndExpr,
 		ER_WITH_INSERT_FIELD:
 		return 1
 
@@ -1006,6 +1016,8 @@ func (e ErrorCode) String() string {
 		return "er_float_double_to_decimal"
 	case ErrIdentifierUpper:
 		return "er_identifier_upper"
+	case ErrWrongAndExpr:
+		return "er_wrong_and_expr"
 	case ER_ERROR_LAST:
 		return "er_error_last"
 	}

@@ -627,7 +627,7 @@ func (s *testSessionIncSuite) TestCreateTable(c *C) {
 	// 外键
 	sql = "create table test_error_code (a int not null ,b int not null,c int not null, d int not null, foreign key (b, c) references product(id));"
 	s.testErrorCode(c, sql,
-		session.NewErr(session.ER_WRONG_NAME_FOR_INDEX, "NULL", "test_error_code"),
+		// session.NewErr(session.ER_WRONG_NAME_FOR_INDEX, "NULL", "test_error_code"),
 		session.NewErr(session.ER_FOREIGN_KEY, "test_error_code"))
 
 	sql = "create table test_error_code (a int not null ,b int not null,c int not null, d int not null, foreign key fk_1(b, c) references product(id));"
@@ -1665,6 +1665,15 @@ WHERE tt1.id=1;`
 		s.testErrorCode(c, sql)
 	}
 
+	sql = `drop table if exists t1;create table t1(id int primary key,c1 int,c2 int);
+		update t1 set c1=1 and c2 = 1 where id=1;`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrWrongAndExpr))
+
+	sql = `drop table if exists t1;create table t1(id int primary key,c1 int,c2 int);
+		update t1 set c1=1,c2 = 1 where id=1;`
+	s.testErrorCode(c, sql)
+
 }
 
 func (s *testSessionIncSuite) TestDelete(c *C) {
@@ -2183,7 +2192,7 @@ func (s *testSessionIncSuite) TestForeignKey(c *C) {
 
 	config.GetGlobalConfig().Inc.EnableForeignKey = false
 
-	s.execSQL(c, "drop table if exists t2; create table t2(id int primary key);drop table if exists t1; ")
+	s.execSQL(c, "drop table if exists t2; create table t2(id int primary key,c1 int,index ix_1(c1));drop table if exists t1; ")
 
 	sql = `create table t1(id int primary key,pid int,constraint FK_1 foreign key (pid) references t2(id));`
 	s.testErrorCode(c, sql,
@@ -2191,6 +2200,29 @@ func (s *testSessionIncSuite) TestForeignKey(c *C) {
 
 	config.GetGlobalConfig().Inc.EnableForeignKey = true
 
+	sql = `create table t1(id int primary key,pid int,constraint FK_1 foreign key (pid) references t2(id));`
+	s.testErrorCode(c, sql)
+
+	sql = `create table t1(id int primary key,pid int,constraint FK_1 foreign key (pid) references t2(id1));`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "t2.id1"))
+
+	sql = `create table t1(id int primary key,pid int,constraint FK_1 foreign key (pid1) references t2(id));`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_COLUMN_NOT_EXISTED, "t1.pid1"))
+
+	sql = `create table t1(id int primary key,c1 int,c2 int,
+				constraint foreign key (c1,c2) references t2(id));`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrWrongFkDefWithMatch, ""))
+
+	sql = `create table t1(id int primary key,c1 int,c2 int,
+				constraint fk_1 foreign key (c1) references t2(id));`
+	s.testErrorCode(c, sql)
+
+	s.execSQL(c, sql)
+
+	sql = `alter table t1 drop foreign key fk_1;`
 	s.testErrorCode(c, sql)
 
 }
@@ -2266,4 +2298,66 @@ func (s *testSessionIncSuite) TestIdentifierUpper(c *C) {
 	)
 
 	config.GetGlobalConfig().Inc.CheckIdentifierUpper = false
+}
+
+func (s *testSessionIncSuite) TestMaxKeys(c *C) {
+	saved := config.GetGlobalConfig().Inc
+	defer func() {
+		config.GetGlobalConfig().Inc = saved
+	}()
+
+	//er_too_many_keys
+	config.GetGlobalConfig().Inc.MaxKeys = 2
+	sql = "drop table if exists t1; create table t1(id int primary key,name varchar(10),age varchar(10));alter table t1 add index idx_test(id),add index idx_test2(name);"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_TOO_MANY_KEYS, "t1", 2))
+
+	config.GetGlobalConfig().Inc.MaxKeys = 3
+	sql = "drop table if exists t1; create table t1(id int primary key,name varchar(10),age varchar(10));alter table t1 add index idx_test(id),add index idx_test2(name);"
+	s.testErrorCode(c, sql)
+
+	//er_too_many_key_parts
+	config.GetGlobalConfig().Inc.MaxKeyParts = 2
+	sql = "drop table if exists t1; create table t1(id int primary key,name varchar(10),age varchar(10));alter table t1 add index idx_test(id,name,age);"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_TOO_MANY_KEY_PARTS, "idx_test", "t1", 2))
+
+	config.GetGlobalConfig().Inc.MaxKeyParts = 3
+	sql = "drop table if exists t1; create table t1(id int primary key,name varchar(10),age varchar(10));alter table t1 add index idx_test(id,name,age);"
+	s.testErrorCode(c, sql)
+
+	//er_pk_too_many_parts
+	config.GetGlobalConfig().Inc.MaxPrimaryKeyParts = 2
+	sql = "drop table if exists t1; create table t1(id int,name varchar(10),age varchar(10),primary key(id,name,age));"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_PK_TOO_MANY_PARTS, "test_inc", "t1", 2))
+
+	config.GetGlobalConfig().Inc.MaxPrimaryKeyParts = 3
+	sql = "drop table if exists t1; create table t1(id int,name varchar(10),age varchar(10),primary key(id,name));"
+	s.testErrorCode(c, sql)
+}
+
+func (s *testSessionIncSuite) TestSetStmt(c *C) {
+	saved := config.GetGlobalConfig().Inc
+	defer func() {
+		config.GetGlobalConfig().Inc = saved
+	}()
+
+	sql = "set names abc;"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrCharsetNotSupport, "utf8,utf8mb4"))
+
+	sql = "set names '';"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrCharsetNotSupport, "utf8,utf8mb4"))
+
+	sql = "set names utf8;"
+	s.testErrorCode(c, sql)
+
+	sql = "set names utf8mb4;"
+	s.testErrorCode(c, sql)
+
+	sql = "set autocommit = 1;"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_NOT_SUPPORTED_YET))
 }
