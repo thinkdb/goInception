@@ -281,7 +281,9 @@ type Inc struct {
 
 	CheckIdentifierUpper bool `toml:"check_identifier_upper" json:"check_identifier_upper"`
 
-	EnableAutoIncrementUnsigned bool `toml:"enable_autoincrement_unsigned" json:"enable_autoincrement_unsigned"`
+	// 连接服务器的默认字符集,默认值为utf8mb4
+	DefaultCharset              string `toml:"default_charset" json:"default_charset"`
+	EnableAutoIncrementUnsigned bool   `toml:"enable_autoincrement_unsigned" json:"enable_autoincrement_unsigned"`
 	// 允许blob,text,json列设置为NOT NULL
 	EnableBlobNotNull   bool `toml:"enable_blob_not_null" json:"enable_blob_not_null"`
 	EnableBlobType      bool `toml:"enable_blob_type" json:"enable_blob_type"`
@@ -394,6 +396,8 @@ type Osc struct {
 
 	// 对应参数pt-online-schema-change中的参数--[no]check-replication-filters。默认值：ON
 	OscCheckReplicationFilters bool `toml:"osc_check_replication_filters" json:"osc_check_replication_filters"`
+	// 是否检查唯一索引,默认检查,如果是,则禁止
+	OscCheckUniqueKeyChange bool `toml:"osc_check_unique_key_change" json:"osc_check_unique_key_change"`
 
 	// 对应参数pt-online-schema-change中的参数--[no]drop-old-table。默认值：ON
 	OscDropOldTable bool `toml:"osc_drop_old_table" json:"osc_drop_old_table"`
@@ -714,6 +718,8 @@ var defaultConf = Config{
 		Lang:                  "en-US",
 		CheckColumnTypeChange: true,
 
+		// 连接服务器选项
+		DefaultCharset:   "utf8mb4",
 		MaxAllowedPacket: 4194304,
 		// Version:            &mysql.TiDBReleaseVersion,
 	},
@@ -727,6 +733,7 @@ var defaultConf = Config{
 		OscMaxLag:                  3,
 		OscCheckAlter:              true,
 		OscCheckReplicationFilters: true,
+		OscCheckUniqueKeyChange:    true,
 		OscDropOldTable:            true,
 		OscDropNewTable:            true,
 		OscMaxThreadRunning:        80,
