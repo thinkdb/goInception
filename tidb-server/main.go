@@ -84,7 +84,7 @@ const (
 var (
 	version = flagBoolean(nmVersion, false, "print version information and exit")
 	// 添加config文件的默认值
-	configPath = flag.String(nmConfig, "", "config file path")
+	configPath = flag.String(nmConfig, "/Users/zhaoshun/go/src/goInception/config/config.toml", "config file path")
 
 	// Base
 	store            = flag.String(nmStore, "mocktikv", "registered store name, [tikv, mocktikv]")
