@@ -144,10 +144,8 @@ func (s *Security) ToTLSConfig() (*tls.Config, error) {
 
 // Status is the status section of the config.
 type Status struct {
-	ReportStatus    bool   `toml:"report-status" json:"report-status"`
-	StatusPort      uint   `toml:"status-port" json:"status-port"`
-	MetricsAddr     string `toml:"metrics-addr" json:"metrics-addr"`
-	MetricsInterval uint   `toml:"metrics-interval" json:"metrics-interval"`
+	ReportStatus bool `toml:"report-status" json:"report-status"`
+	StatusPort   uint `toml:"status-port" json:"status-port"`
 }
 
 // Performance is the performance section of the config.
@@ -299,7 +297,7 @@ type Inc struct {
 	EnableIdentiferKeyword bool `toml:"enable_identifer_keyword" json:"enable_identifer_keyword"`
 	EnableJsonType         bool `toml:"enable_json_type" json:"enable_json_type"`
 	// 是否启用自定义审核级别设置
-	EnableLevel bool `toml:"enable_level" json:"enable_level"`
+	// EnableLevel bool `toml:"enable_level" json:"enable_level"`
 	// 是否允许指定存储引擎
 	EnableSetEngine        bool `toml:"enable_set_engine" json:"enable_set_engine"`
 	EnableNullable         bool `toml:"enable_nullable" json:"enable_nullable"`               // 允许空列
@@ -314,6 +312,12 @@ type Inc struct {
 	EnableSetCollation bool `toml:"enable_set_collation" json:"enable_set_collation"`
 	// 开启sql统计
 	EnableSqlStatistic bool `toml:"enable_sql_statistic" json:"enable_sql_statistic"`
+
+	// explain判断受影响行数时使用的规则, 默认值"first"
+	// 可选值: "first", "max"
+	// 		"first": 	使用第一行的explain结果作为受影响行数
+	// 		"max": 		使用explain结果中的最大值作为受影响行数
+	ExplainRule string `toml:"explain_rule" json:"explain_rule"`
 
 	// 全量日志
 	GeneralLog bool `toml:"general_log" json:"general_log"`
@@ -619,6 +623,7 @@ type IncLevel struct {
 	ErrWrongAndExpr                 int8 `toml:"er_wrong_and_expr"`
 	ErCantChangeColumnPosition      int8 `toml:"er_cant_change_column_position"`
 	ErJsonTypeSupport               int8 `toml:"er_json_type_support"`
+	ErrJoinNoOnCondition            int8 `toml:"er_join_no_on_condition"`
 }
 
 var defaultConf = Config{
@@ -653,9 +658,8 @@ var defaultConf = Config{
 		QueryLogMaxLen:     2048,
 	},
 	Status: Status{
-		ReportStatus:    false,
-		StatusPort:      10080,
-		MetricsInterval: 15,
+		ReportStatus: false,
+		StatusPort:   10080,
 	},
 	Performance: Performance{
 		TCPKeepAlive: false,
@@ -721,6 +725,7 @@ var defaultConf = Config{
 		// 连接服务器选项
 		DefaultCharset:   "utf8mb4",
 		MaxAllowedPacket: 4194304,
+		ExplainRule:      "first",
 		// Version:            &mysql.TiDBReleaseVersion,
 	},
 	Osc: Osc{
@@ -788,6 +793,7 @@ var defaultConf = Config{
 		ER_INVALID_IDENT:                1,
 		ER_MUST_HAVE_COLUMNS:            1,
 		ER_NO_WHERE_CONDITION:           1,
+		ErrJoinNoOnCondition:            1,
 		ER_NOT_ALLOWED_NULLABLE:         1,
 		ER_ORDERY_BY_RAND:               1,
 		ER_PARTITION_NOT_ALLOWED:        1,

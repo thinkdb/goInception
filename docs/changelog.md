@@ -1,5 +1,54 @@
 # goInception 更新日志
 
+## [v1.1.1] - 2019-10-13
+
+### Fix
+* 修复TiDB数据库explain出错的问题 (#86)
+* 修复`insert select`语法在有删除列时列数校验可能不准确的问题
+
+### New Features
+* 添加审核选项 `explain_rule` ,用以设置explain获取受影响行数方式
+
+### Update
+* 完善`spatial index`审核规则
+* 调整update语法均进行逻辑审核
+* 添加join语法的ON子句审核
+* 优化delete审核规则,有新表时跳过explain审核
+* 远程数据库无法连接时,优化返回结果,添加sql内容返回
+
+
+## [v1.1.0] - 2019-9-7
+
+### Fix
+* 修复add column操作未命中`merge_alter_table`检测的问题 (#79)
+
+### New Features
+* 添加空间类型语法解析,添加空间索引支持
+* 添加新的调用选项`--db`,用以设置默认连接的数据库,默认值为`mysql`
+
+### Update
+* 支持建库时同时创建表等操作 (#77)
+* 优化DDL回滚细节,对alter table多条子句调整回滚SQL为逆向 (#76)
+* 在执行前添加数据库只读状态判断
+* 优化索引总长度审核,现在基于目标库`innodb_large_prefix`参数判断
+* 审核select语法中的星号列
+* 优化多语句拆分解析逻辑,优化分号末尾但未结束的SQL解析
+* 完善列定义中的索引校验
+
+
+## [v1.0.5] - 2019-8-20
+
+### Fix
+* 修复insert values子句不支持default语法的问题
+
+### New Features
+* 添加参数`default_charset` 用以设置连接数据库的默认字符集,默认值`utf8mb4` (解决低版本不支持utf8mb4的问题)
+* 添加pt-osc参数`osc_check_unique_key_change`, 设置pt-osc是否检查唯一索引,默认为`true`
+
+### Update
+* 优化回滚功能,添加binlog_row_image设置检查,为minimal时自动修改会话级别为full
+
+
 ## [v1.0.4] - 2019-8-5
 
 ### New Features

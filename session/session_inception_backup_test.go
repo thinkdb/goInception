@@ -139,6 +139,18 @@ inception_magic_commit;`
 	return res
 }
 
+func (s *testSessionIncBackupSuite) makeExecSQL(tk *testkit.TestKit, sql string) *testkit.Result {
+
+	session.CheckAuditSetting(config.GetGlobalConfig())
+
+	a := `/*--user=test;--password=test;--host=127.0.0.1;--execute=1;--backup=0;--port=3306;--enable-ignore-warnings;real_row_count=%v;*/
+inception_magic_start;
+use test_inc;
+%s;
+inception_magic_commit;`
+	return tk.MustQueryInc(fmt.Sprintf(a, s.realRowCount, sql))
+}
+
 func (s *testSessionIncBackupSuite) getDBVersion(c *C) int {
 	if testing.Short() {
 		c.Skip("skipping test; in TRAVIS mode")
@@ -255,7 +267,7 @@ func (s *testSessionIncBackupSuite) TestAlterTableAddColumn(c *C) {
 	res = s.makeSQL(c, tk, "alter table t1 add column (c3 int,c4 varchar(20));")
 	row = res.Rows()[int(tk.Se.AffectedRows())-1]
 	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` DROP COLUMN `c3`,DROP COLUMN `c4`;")
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` DROP COLUMN `c4`,DROP COLUMN `c3`;")
 
 	// 特殊字符
 	config.GetGlobalConfig().Inc.CheckIdentifier = false
@@ -692,11 +704,11 @@ func (s *testSessionIncBackupSuite) TestRenameTable(c *C) {
 	res = s.makeSQL(c, tk, "alter table t2 rename to t1;")
 	row = res.Rows()[int(tk.Se.AffectedRows())-1]
 	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "RENAME TABLE `test_inc`.`t1` TO `test_inc`.`t2`;", Commentf("%v", res.Rows()))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t2` RENAME TO `test_inc`.`t2`;", Commentf("%v", res.Rows()))
 
 }
 
-func (s *testSessionIncBackupSuite) TestAlterTableAddIndex(c *C) {
+func (s *testSessionIncBackupSuite) TestAlterTableCreateIndex(c *C) {
 	tk := testkit.NewTestKitWithInit(c, s.store)
 	saved := config.GetGlobalConfig().Inc
 	defer func() {
@@ -709,6 +721,12 @@ func (s *testSessionIncBackupSuite) TestAlterTableAddIndex(c *C) {
 	backup := s.query("t1", row[7].(string))
 	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` DROP INDEX `idx`;", Commentf("%v", res.Rows()))
 
+	s.makeSQL(c, tk, "drop table if exists t1;create table t1(id int,c1 int);")
+	res = s.makeSQL(c, tk, "create index idx on t1(c1);")
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "DROP INDEX `idx` ON `test_inc`.`t1`;", Commentf("%v", res.Rows()))
+
 }
 
 func (s *testSessionIncBackupSuite) TestAlterTableDropIndex(c *C) {
@@ -717,12 +735,57 @@ func (s *testSessionIncBackupSuite) TestAlterTableDropIndex(c *C) {
 	defer func() {
 		config.GetGlobalConfig().Inc = saved
 	}()
+	sql := ""
 
 	s.makeSQL(c, tk, "drop table if exists t1;create table t1(id int,c1 int);alter table t1 add index idx (c1);")
 	res := s.makeSQL(c, tk, "alter table t1 drop index idx;")
 	row := res.Rows()[int(tk.Se.AffectedRows())-1]
 	backup := s.query("t1", row[7].(string))
 	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD INDEX `idx`(`c1`);", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int primary key,c1 int,unique index ix_1(c1));
+	alter table t1 drop index ix_1;`
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD UNIQUE INDEX `ix_1`(`c1`);", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int primary key,c1 int);
+	alter table t1 add unique index ix_1(c1);
+	alter table t1 drop index ix_1;`
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD UNIQUE INDEX `ix_1`(`c1`);", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int primary key,c1 GEOMETRY not null ,SPATIAL index ix_1(c1));
+	alter table t1 drop index ix_1;`
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD SPATIAL INDEX `ix_1`(`c1`);", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int primary key,c1 GEOMETRY not null);
+	alter table t1 add SPATIAL index ix_1(c1);
+	alter table t1 drop index ix_1;`
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD SPATIAL INDEX `ix_1`(`c1`);", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int primary key,c1 GEOMETRY not null);
+	alter table t1 add SPATIAL index ix_1(c1);`
+	s.makeExecSQL(tk, sql)
+	sql = "alter table t1 drop index ix_1;"
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD SPATIAL INDEX `ix_1`(`c1`);", Commentf("%v", res.Rows()))
 
 }
 
@@ -750,7 +813,7 @@ func (s *testSessionIncBackupSuite) TestAlterTable(c *C) {
 	res = s.makeSQL(c, tk, sql)
 	row = res.Rows()[int(tk.Se.AffectedRows())-1]
 	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD COLUMN `c1` int(11),DROP COLUMN `c1`;", Commentf("%v", res.Rows()))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` DROP COLUMN `c1`,ADD COLUMN `c1` int(11);", Commentf("%v", res.Rows()))
 
 	// 删除后添加索引
 	sql = "drop table if exists t1;create table t1(id int ,c1 int,key ix(c1));alter table t1 drop index ix;alter table t1 add index ix(c1);"
@@ -759,11 +822,54 @@ func (s *testSessionIncBackupSuite) TestAlterTable(c *C) {
 	backup = s.query("t1", row[7].(string))
 	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` DROP INDEX `ix`;", Commentf("%v", res.Rows()))
 
-	sql = "drop table if exists t1;create table t1(id int,c1 int,key ix(c1));alter table t1 drop index ix,add index ix(c1);"
+	sql = "drop table if exists t1;create table t1(id int,c1 int,c2 int,key ix(c2));alter table t1 drop index ix,add index ix(c1);"
 	res = s.makeSQL(c, tk, sql)
 	row = res.Rows()[int(tk.Se.AffectedRows())-1]
 	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD INDEX `ix`(`c1`),DROP INDEX `ix`;", Commentf("%v", res.Rows()))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` DROP INDEX `ix`,ADD INDEX `ix`(`c2`);", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int,c1 int,c2 datetime null default current_timestamp on update current_timestamp comment '123');
+	alter table t1 modify c2 datetime;`
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` MODIFY COLUMN `c2` datetime ON UPDATE CURRENT_TIMESTAMP COMMENT '123';", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int,c1 int,c2 datetime null default current_timestamp on update current_timestamp comment '123');
+	alter table t1 modify c2 datetime;`
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` MODIFY COLUMN `c2` datetime ON UPDATE CURRENT_TIMESTAMP COMMENT '123';", Commentf("%v", res.Rows()))
+
+	// 空间类型使用的是别名,逆向SQL还有问题,待修复
+	sql = `drop table if exists t1;
+	create table t1(id int primary key);
+	alter table t1 add column c1 geometry;
+	alter table t1 add column c2 point;
+	alter table t1 add column c3 linestring;
+	alter table t1 add column c4 polygon;
+	alter table t1 drop column c1,drop column c2,drop column c3,drop column c4;`
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD COLUMN `c4` geometry,ADD COLUMN `c3` geometry,ADD COLUMN `c2` geometry,ADD COLUMN `c1` geometry;", Commentf("%v", res.Rows()))
+
+	sql = `drop table if exists t1;
+	create table t1(id int primary key);
+	alter table t1 add column c1 geometry;
+	alter table t1 add column c2 point;
+	alter table t1 add column c3 linestring;
+	alter table t1 add column c4 polygon;`
+	s.makeExecSQL(tk, sql)
+
+	sql = `alter table t1 drop column c1,drop column c2,drop column c3,drop column c4; `
+	res = s.makeSQL(c, tk, sql)
+	row = res.Rows()[int(tk.Se.AffectedRows())-1]
+	backup = s.query("t1", row[7].(string))
+	c.Assert(backup, Equals, "ALTER TABLE `test_inc`.`t1` ADD COLUMN `c4` polygon,ADD COLUMN `c3` linestring,ADD COLUMN `c2` point,ADD COLUMN `c1` geometry;", Commentf("%v", res.Rows()))
 
 }
 

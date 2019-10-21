@@ -92,8 +92,8 @@ func (s *testSessionIncSuite) SetUpSuite(c *C) {
 	config.GetGlobalConfig().Inc.EnableFingerprint = true
 	config.GetGlobalConfig().Inc.SqlSafeUpdates = 0
 	config.GetGlobalConfig().Inc.EnableDropTable = true
-	// 启用自定义审核级别
-	config.GetGlobalConfig().Inc.EnableLevel = true
+	// // 启用自定义审核级别
+	// config.GetGlobalConfig().Inc.EnableLevel = true
 
 	session.SetLanguage("en-US")
 
@@ -1074,6 +1074,20 @@ func (s *testSessionIncSuite) TestAlterTableAddColumn(c *C) {
 	// 特殊字符
 	sql = "drop table if exists `t3!@#$^&*()`;create table `t3!@#$^&*()`(id int primary key);alter table `t3!@#$^&*()` add column `c3!@#$^&*()2` int comment '123';"
 	s.testErrorCode(c, sql)
+
+	sql = "drop table if exists t1;create table t1(id int primary key);alter table t1 add column c1 int primary key;"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_DUP_INDEX, "PRIMARY", "test_inc", "t1"))
+
+	sql = "drop table if exists t1;create table t1(id int,key c1(id));alter table t1 add column c1 int unique;"
+	s.testErrorCode(c, sql)
+
+	sql = `drop table if exists t1;
+			create table t1(id int,key c1(id));
+			alter table t1 add column c1 int unique;
+			alter table t1 add index c1(c1);`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_DUP_INDEX, "c1", "test_inc", "t1"))
 }
 
 func (s *testSessionIncSuite) TestAlterTableAlterColumn(c *C) {
@@ -1500,12 +1514,36 @@ insert into t2 select id from t1;`
 	insert into tt1(id)
 		select s1.id from t1 as s1 inner join t1 as s2 on s1.c1 = s2.c1 where s1.id > s2.id;`
 	s.testErrorCode(c, sql)
+
+	config.GetGlobalConfig().Inc.EnableSelectStar = false
+	sql = `drop table if exists tt1;create table tt1(id int,c1 int);insert into tt1 select * from tt1;`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_SELECT_ONLY_STAR))
+}
+
+func (s *testSessionIncSuite) TestSelect(c *C) {
+	saved := config.GetGlobalConfig().Inc
+	defer func() {
+		config.GetGlobalConfig().Inc = saved
+	}()
+
+	config.GetGlobalConfig().Inc.EnableSelectStar = false
+
+	s.execSQL(c, "drop table if exists t1;create table t1(id int,c1 int);")
+	sql = `select * from t1;`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_SELECT_ONLY_STAR))
+
+	sql = `select id,c1 from t1 union all select * from t1;`
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_SELECT_ONLY_STAR))
 }
 
 func (s *testSessionIncSuite) TestUpdate(c *C) {
 	saved := config.GetGlobalConfig().Inc
 	defer func() {
 		config.GetGlobalConfig().Inc = saved
+		s.realRowCount = true
 	}()
 
 	config.GetGlobalConfig().Inc.CheckInsertField = false
@@ -1562,6 +1600,13 @@ func (s *testSessionIncSuite) TestUpdate(c *C) {
 		session.NewErr(session.ER_NO_WHERE_CONDITION))
 	config.GetGlobalConfig().Inc.CheckDMLWhere = false
 
+	// where
+	config.GetGlobalConfig().Inc.CheckDMLWhere = true
+	sql = "create table t1(id int,c1 int);create table t2(id int,c1 int);update t1 join t2 set t1.c1 = 1 where t1.id=1;"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ErrJoinNoOnCondition))
+	config.GetGlobalConfig().Inc.CheckDMLWhere = false
+
 	// limit
 	config.GetGlobalConfig().Inc.CheckDMLLimit = true
 	sql = "create table t1(id int,c1 int);update t1 set c1 = 1 limit 1;"
@@ -1577,11 +1622,33 @@ func (s *testSessionIncSuite) TestUpdate(c *C) {
 	config.GetGlobalConfig().Inc.CheckDMLOrderBy = false
 
 	// 受影响行数
+	s.realRowCount = false
 	res := s.makeSQL("create table t1(id int,c1 int);update t1 set c1 = 1;")
 	row := res.Rows()[int(s.tk.Se.AffectedRows())-1]
 	c.Assert(row[2], Equals, "0")
 	c.Assert(row[6], Equals, "0")
 
+	// 受影响行数: explain计算规则
+	s.execSQL(c, `drop table if exists t1,t2;
+			create table t1(id int primary key,c1 int);
+			create table t2(id int primary key,c1 int);
+			insert into t1(id,c1)values(1,1);
+			insert into t2(id,c1)values(1,1),(2,2),(3,3);`)
+
+	config.GetGlobalConfig().Inc.ExplainRule = "first"
+	sql = `update t1 inner join t2 on 1=1 set t1.c1=t2.c1 where 1=1;`
+	res = s.makeSQL(sql)
+	row = res.Rows()[int(s.tk.Se.AffectedRows())-1]
+	c.Assert(row[2], Equals, "0", Commentf("%v", res.Rows()))
+	c.Assert(row[6], Equals, "1", Commentf("%v", res.Rows()))
+
+	config.GetGlobalConfig().Inc.ExplainRule = "max"
+	res = s.makeSQL(sql)
+	row = res.Rows()[int(s.tk.Se.AffectedRows())-1]
+	c.Assert(row[2], Equals, "0", Commentf("%v", res.Rows()))
+	c.Assert(row[6], Equals, "3", Commentf("%v", res.Rows()))
+
+	s.execSQL(c, `drop table if exists t1,t2`)
 	// res = s.makeSQL( "create table t1(id int primary key,c1 int);insert into t1 values(1,1),(2,2);update t1 set c1 = 1 where id = 1;")
 	// row = res.Rows()[int(s.tk.Se.AffectedRows())-1]
 	// c.Assert(row[2], Equals, "0")
@@ -1765,6 +1832,10 @@ func (s *testSessionIncSuite) TestDelete(c *C) {
 		delete s1 from t1 as s1 inner join t1 as s2 on s1.c1 = s2.c1 where s1.id > s2.id;`
 	s.testErrorCode(c, sql)
 
+	s.execSQL(c, "drop table if exists t1;create table t1(id int primary key,c1 int);")
+	sql = `create table t2(id int primary key,c1 int);
+			delete t1 from t1 inner join t2 where t2.c1 = 1;`
+	s.testErrorCode(c, sql)
 }
 
 func (s *testSessionIncSuite) TestCreateDataBase(c *C) {
@@ -1827,6 +1898,16 @@ func (s *testSessionIncSuite) TestCreateDataBase(c *C) {
 	sql = "drop database test1;create database test1 character set laitn1;"
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ErrCharsetNotSupport, "utf8,utf8mb4"))
+
+	sql = `drop database test1;create database test1;
+	use test1;
+	create table t1(id int primary key);
+	insert into t1 values(1);
+	insert into t1 select count(1)+1 from t1;
+	alter table t1 add column c1 int;
+	update t1 set c1=1 where id=1;
+	delete from t1 where id =1;`
+	s.testErrorCode(c, sql)
 }
 
 func (s *testSessionIncSuite) TestTimestampColumn(c *C) {
@@ -2017,6 +2098,22 @@ func (s *testSessionIncSuite) TestAlterTableAddIndex(c *C) {
 
 	sql = "create table t1(id int primary key);alter table t1 drop primary key;"
 	s.testErrorCode(c, sql)
+
+	sql = "CREATE TABLE geom (g GEOMETRY NOT NULL, SPATIAL INDEX ix_1(g));"
+	s.testErrorCode(c, sql)
+
+	sql = "CREATE TABLE geom (g GEOMETRY NULL, SPATIAL INDEX ix_1(g));"
+	s.testErrorCode(c, sql,
+		&session.SQLError{Code: 0,
+			Message: "All parts of a SPATIAL index must be NOT NULL."})
+
+	sql = "CREATE TABLE geom (id int,g GEOMETRY NOT NULL, SPATIAL INDEX ix_1(id,g));"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_TOO_MANY_KEY_PARTS, "ix_1", "geom", 1))
+
+	sql = "CREATE TABLE geom (id int,g GEOMETRY NOT NULL);alter table geom add SPATIAL INDEX ix_1(id,g);"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_TOO_MANY_KEY_PARTS, "ix_1", "geom", 1))
 }
 
 func (s *testSessionIncSuite) TestAlterTableDropIndex(c *C) {
@@ -2070,6 +2167,19 @@ func (s *testSessionIncSuite) TestAlterTable(c *C) {
 	sql = "alter table t1 add column c2 int;"
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ER_CHANGE_TOO_MUCH_ROWS, "Alter", 2, 1))
+
+	sql = `drop table if exists t1;
+	create table t1(id int primary key);
+	alter table t1 add column c1 geometry;
+	alter table t1 add column c2 point;
+	alter table t1 add column c3 linestring;
+	alter table t1 add column c4 polygon;
+
+	alter table t1 drop column c1;
+	alter table t1 drop column c2;
+	alter table t1 drop column c3;
+	alter table t1 drop column c4; `
+	s.testErrorCode(c, sql)
 
 }
 
@@ -2360,4 +2470,29 @@ func (s *testSessionIncSuite) TestSetStmt(c *C) {
 	sql = "set autocommit = 1;"
 	s.testErrorCode(c, sql,
 		session.NewErr(session.ER_NOT_SUPPORTED_YET))
+}
+
+func (s *testSessionIncSuite) TestMergeAlterTable(c *C) {
+	saved := config.GetGlobalConfig().Inc
+	defer func() {
+		config.GetGlobalConfig().Inc = saved
+	}()
+
+	//er_alter_table_once
+	config.GetGlobalConfig().Inc.MergeAlterTable = true
+	sql = "drop table if exists t1; create table t1(id int primary key,name varchar(10));alter table t1 add age varchar(10);alter table t1 add sex varchar(10);"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_ALTER_TABLE_ONCE, "t1"))
+
+	//er_alter_table_once
+	config.GetGlobalConfig().Inc.MergeAlterTable = true
+	sql = "drop table if exists t1; create table t1(id int primary key,name varchar(10));alter table t1 modify name varchar(10);alter table t1 modify name varchar(10);"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_ALTER_TABLE_ONCE, "t1"))
+
+	//er_alter_table_once
+	config.GetGlobalConfig().Inc.MergeAlterTable = true
+	sql = "drop table if exists t1; create table t1(id int primary key,name varchar(10));alter table t1 change name name varchar(10);alter table t1 change name name varchar(10);"
+	s.testErrorCode(c, sql,
+		session.NewErr(session.ER_ALTER_TABLE_ONCE, "t1"))
 }
